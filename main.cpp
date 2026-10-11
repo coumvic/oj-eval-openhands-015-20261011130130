@@ -4,12 +4,17 @@
 #include <vector>
 #include <algorithm>
 #include <unordered_set>
+#include <unordered_map>
 
 using namespace std;
 
 class FileStorageDB {
 private:
-    static const int NUM_BUCKETS = 8;
+    static const int NUM_BUCKETS = 16;
+    static const int CACHE_SIZE = 100;
+    
+    // Simple cache for recent find operations
+    unordered_map<string, vector<int>> findCache;
     
     string getBucketFile(const string& key) {
         unsigned int hash = 0;
@@ -178,16 +183,36 @@ public:
         
         // Insert to bucket
         insertToBucket(bucketFile, key, value);
+        
+        // Invalidate cache for this key
+        findCache.erase(key);
     }
     
     void remove(const string& key, int value) {
         string bucketFile = getBucketFile(key);
         removeFromBucket(bucketFile, key, value);
+        
+        // Invalidate cache for this key
+        findCache.erase(key);
     }
     
     vector<int> find(const string& key) {
+        // Check cache first
+        auto it = findCache.find(key);
+        if (it != findCache.end()) {
+            return it->second;
+        }
+        
         string bucketFile = getBucketFile(key);
-        return findInBucket(bucketFile, key);
+        vector<int> result = findInBucket(bucketFile, key);
+        
+        // Add to cache
+        if (findCache.size() >= CACHE_SIZE) {
+            findCache.clear();
+        }
+        findCache[key] = result;
+        
+        return result;
     }
 };
 
