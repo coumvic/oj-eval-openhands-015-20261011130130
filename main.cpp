@@ -9,7 +9,7 @@ using namespace std;
 
 class FileStorageDB {
 private:
-    static const int NUM_BUCKETS = 256;
+    static const int NUM_BUCKETS = 16;
     
     string getBucketFile(const string& key) {
         unsigned int hash = 0;
