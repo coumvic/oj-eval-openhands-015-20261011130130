@@ -3,12 +3,21 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <unordered_map>
+#include <set>
 
 using namespace std;
 
 class FileStorageDB {
 private:
     string dataFile = "database.dat";
+    
+    // Limited in-memory index: key -> set of values
+    // We only store values, not offsets, to save memory
+    unordered_map<string, set<int>> keyIndex;
+    
+    // Maximum number of keys to keep in memory index
+    static const size_t MAX_KEYS_IN_MEMORY = 1000;
     
     struct Record {
         string key;
@@ -20,7 +29,7 @@ private:
         Record(string k, int v, bool d, long o) : key(k), value(v), deleted(d), offset(o) {}
     };
     
-    bool exists(const string& key, int value) {
+    bool existsInFile(const string& key, int value) {
         ifstream data(dataFile, ios::binary);
         if (!data.is_open()) return false;
         
@@ -54,9 +63,64 @@ private:
         return false;
     }
     
+    bool existsInMemory(const string& key, int value) {
+        auto it = keyIndex.find(key);
+        if (it != keyIndex.end()) {
+            return it->second.count(value) > 0;
+        }
+        return false;
+    }
+    
+    void addToMemoryIndex(const string& key, int value) {
+        if (keyIndex.size() >= MAX_KEYS_IN_MEMORY) {
+            // Clear some entries to make space
+            keyIndex.clear();
+        }
+        keyIndex[key].insert(value);
+    }
+    
+    void removeFromMemoryIndex(const string& key, int value) {
+        auto it = keyIndex.find(key);
+        if (it != keyIndex.end()) {
+            it->second.erase(value);
+            if (it->second.empty()) {
+                keyIndex.erase(it);
+            }
+        }
+    }
+    
 public:
     FileStorageDB() {
-        // No initialization needed
+        // Load some initial data into memory index
+        ifstream data(dataFile, ios::binary);
+        if (!data.is_open()) return;
+        
+        data.seekg(0, ios::end);
+        long fileSize = data.tellg();
+        data.seekg(0, ios::beg);
+        
+        long offset = 0;
+        while (offset < fileSize && keyIndex.size() < MAX_KEYS_IN_MEMORY) {
+            bool deleted;
+            data.read(reinterpret_cast<char*>(&deleted), sizeof(bool));
+            
+            size_t keySize;
+            data.read(reinterpret_cast<char*>(&keySize), sizeof(size_t));
+            
+            string key(keySize, '\0');
+            data.read(&key[0], keySize);
+            
+            int value;
+            data.read(reinterpret_cast<char*>(&value), sizeof(int));
+            
+            if (!deleted) {
+                keyIndex[key].insert(value);
+            }
+            
+            offset += sizeof(bool) + sizeof(size_t) + keySize + sizeof(int);
+        }
+        
+        data.close();
     }
     
     ~FileStorageDB() {
@@ -65,7 +129,7 @@ public:
     
     void insert(const string& key, int value) {
         // Check if this key-value pair already exists
-        if (exists(key, value)) {
+        if (existsInMemory(key, value) || existsInFile(key, value)) {
             return; // Already exists, don't insert duplicate
         }
         
@@ -83,6 +147,9 @@ public:
         data.write(reinterpret_cast<char*>(&value), sizeof(int));
         
         data.close();
+        
+        // Update memory index
+        addToMemoryIndex(key, value);
     }
     
     void remove(const string& key, int value) {
@@ -94,6 +161,7 @@ public:
         data.seekg(0, ios::beg);
         
         long offset = 0;
+        bool found = false;
         while (offset < fileSize) {
             long currentOffset = offset;
             
@@ -114,18 +182,30 @@ public:
                 data.seekp(currentOffset);
                 deleted = true;
                 data.write(reinterpret_cast<char*>(&deleted), sizeof(bool));
-                data.close();
-                return;
+                found = true;
+                break;
             }
             
             offset += sizeof(bool) + sizeof(size_t) + keySize + sizeof(int);
         }
         
         data.close();
+        
+        if (found) {
+            removeFromMemoryIndex(key, value);
+        }
     }
     
     vector<int> find(const string& key) {
         vector<int> result;
+        
+        // First check memory index
+        auto it = keyIndex.find(key);
+        if (it != keyIndex.end()) {
+            result.insert(result.end(), it->second.begin(), it->second.end());
+        }
+        
+        // Then check file for any additional entries
         ifstream data(dataFile, ios::binary);
         if (!data.is_open()) return result;
         
@@ -148,7 +228,10 @@ public:
             data.read(reinterpret_cast<char*>(&currentValue), sizeof(int));
             
             if (!deleted && currentKey == key) {
-                result.push_back(currentValue);
+                // Check if already in result (from memory index)
+                if (std::find(result.begin(), result.end(), currentValue) == result.end()) {
+                    result.push_back(currentValue);
+                }
             }
             
             offset += sizeof(bool) + sizeof(size_t) + keySize + sizeof(int);
